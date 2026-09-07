@@ -145,41 +145,22 @@ fn ray_toi_and_normal_with_capsule(
     let (inside, inter) = ray_toi_with_capsule(segment, radius, ray, solid);
 
     inter.map(|t| {
-        let o = ray.origin;
-        let d = ray.dir;
-        let ba = segment.b - segment.a;
-        let l2 = ba.length_squared();
+        let p = ray.origin + ray.dir * t;
+        let a_to_p = p - segment.a;
+        let seg = segment.b - segment.a;
+        let seg_squared = seg.length_squared();
 
-        let n = if d.length_squared().is_zero() {
-            // Degenerate zero-length ray: toward the closest axis point.
-            let s = if l2 > 0.0 {
-                (ba.dot(o - segment.a) / l2).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            (segment.a + ba * s - o).normalize()
-        } else if solid && t.is_zero() {
-            // Contact at the origin: normal opposing the ray.
-            (-d).normalize()
+        // the projection of the point onto the capsule's axis times the segment's length
+        let proj_times_seg = a_to_p.dot(seg);
+
+        let normal = if proj_times_seg <= 0.0 {
+            (a_to_p).normalize()
+        } else if proj_times_seg >= seg_squared {
+            (p - segment.b).normalize()
         } else {
-            let p = o + d * t;
-            let y = ba.dot(p - segment.a);
-            let normal = if y > 0.0 && y < l2 {
-                (p - segment.a - ba * (y / l2)).normalize()
-            } else if y <= 0.0 {
-                (p - segment.a).normalize()
-            } else {
-                (p - segment.b).normalize()
-            };
-            if inside {
-                // Hollow: exit, inward normal.
-                -normal
-            } else {
-                normal
-            }
+            (a_to_p - (proj_times_seg / seg_squared) * seg).normalize()
         };
-
-        RayIntersection::new(t, n, FeatureId::Face(0))
+        RayIntersection::new(t, if inside { -normal } else { normal }, FeatureId::Face(0))
     })
 }
 
@@ -213,8 +194,8 @@ mod tests {
         assert!(c
             .cast_local_ray(&Ray::new(v2(10.0, 5.0), v2(0.0, 0.1)), 50.0, true)
             .is_none());
-        // Inside, solid: contact at the origin, normal opposing the ray.
-        expect_hit(&c, v2(0.0, 1.0), v2(0.0, 1.0), true, 0.0, v2(0.0, -1.0));
+        // Inside, solid: contact at the origin, inward radial normal.
+        expect_hit(&c, v2(0.1, 1.0), v2(0.0, 1.0), true, 0.0, v2(-1.0, 0.0));
         // Inside, hollow: the exit, inward normal.
         expect_hit(&c, v2(0.0, 1.0), v2(0.0, 1.0), false, 1.0, v2(0.0, -1.0));
         // Degenerate zero-length ray, inside / outside.
