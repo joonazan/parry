@@ -88,10 +88,12 @@ fn ray_toi_with_capsule(
         let b = ray.dir.dot(oc);
         let c = oc.length_squared() - radius_squared;
         let h = b * b - c * dir_dir;
-        let radical = h.sqrt();
-        let t = -b + if inside { radical } else { -radical };
-        if h >= 0.0 && t >= 0.0 {
-            return (inside, Some(t / dir_dir));
+        if h >= 0.0 {
+            let radical = h.sqrt();
+            let t = -b + if inside { radical } else { -radical };
+            if t >= 0.0 && dir_dir != 0.0 {
+                return (inside, Some(t / dir_dir));
+            }
         }
     }
     return (inside, None);
