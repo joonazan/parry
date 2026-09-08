@@ -2,8 +2,6 @@ use crate::math::{Real, Vector};
 use crate::query::{Ray, RayCast, RayIntersection};
 use crate::shape::{Capsule, FeatureId, Segment};
 
-use num::Zero;
-
 impl RayCast for Capsule {
     #[inline]
     fn cast_local_ray(&self, ray: &Ray, max_time_of_impact: Real, solid: bool) -> Option<Real> {
@@ -27,116 +25,11 @@ impl RayCast for Capsule {
 /// Computes the time of impact of a ray on a capsule.
 /// Returns true if the ray started inside the capsule and the time of impact.
 ///
-/// Adapted from Inigo Quilez (https://iquilezles.org/articles/intersectors/),
-/// extended for unnormalized directions, and an explicit axis-parallel special case
-/// (the original depends on GLSL zero division behaviour).
-/// The cap quadratics are built from the body's scalars
-/// ("extend the quadratic", cf. PhysX's `Gu::intersectRayCapsule`).
-#[inline]
-fn ray_toi_with_capsule_ai(
-    segment: &Segment,
-    radius: Real,
-    ray: &Ray,
-    solid: bool,
-) -> (bool, Option<Real>) {
-    let r = radius;
-    let o = ray.origin;
-    let d = ray.dir;
-    let ba = segment.b - segment.a;
-    let oa = o - segment.a;
-    let l2 = ba.length_squared();
-    let dd = d.length_squared();
-    let bard = ba.dot(d);
-    let baoa = ba.dot(oa);
-    let rdoa = d.dot(oa);
-    let oaoa = oa.length_squared();
-    let a = l2 * dd - bard * bard;
-    let b = l2 * rdoa - baoa * bard;
-    let c = l2 * oaoa - baoa * baoa - r * r * l2;
-    let h = b * b - a * c;
-    let axis_coord = |t: Real| baoa + t * bard;
-
-    // The sphere of radius `r` around the cap center (segment.a or segment.b)
-    // as a quadratic in `t`, scaled by |d|^2 and built from the body's
-    // scalars. `root` = -1.0 is the entry, +1.0 the exit.
-    let cap_toi = |b_end: bool, root: Real| -> Option<Real> {
-        let b2 = if b_end { rdoa - bard } else { rdoa };
-        let c2 = if b_end {
-            oaoa - 2.0 * baoa + l2 - r * r
-        } else {
-            oaoa - r * r
-        };
-        let h2 = b2 * b2 - dd * c2;
-        (h2 >= 0.0)
-            .then(|| {
-                let t = (-b2 + root * h2.sqrt()) / dd;
-                (t >= 0.0).then_some(t)
-            })
-            .flatten()
-    };
-
-    // Inside the capsule (division-free; the band test is scaled by l2).
-    let inside = oaoa <= r * r
-        || oaoa - 2.0 * baoa + l2 <= r * r
-        || (baoa > 0.0 && baoa < l2 && (oaoa - r * r) * l2 <= baoa * baoa);
-
-    // A degenerate (zero-length) ray: contact iff the origin is inside.
-    if dd.is_zero() {
-        return (inside, inside.then_some(0.0));
-    }
-
-    if inside {
-        if solid {
-            // Contact at the origin.
-            return (true, Some(0.0));
-        }
-        // Hollow: the exit, i.e. the latest boundary crossing.
-        let mut best: Option<Real> = None;
-        if a > 0.0 && h >= 0.0 {
-            let t = (-b + h.sqrt()) / a;
-            let y = axis_coord(t);
-            if y > 0.0 && y < l2 {
-                best = Some(t);
-            }
-        }
-        for b_end in [false, true] {
-            if let Some(t) = cap_toi(b_end, 1.0) {
-                let y = axis_coord(t);
-                let valid = (b_end && y >= l2) || (!b_end && y <= 0.0);
-                if valid && best.is_none_or(|x| t > x) {
-                    best = Some(t);
-                }
-            }
-        }
-        return (true, best);
-    }
-
-    // Outside: the first contact.
-    if a > 0.0 {
-        if h >= 0.0 {
-            let t = (-b - h.sqrt()) / a;
-            let y = axis_coord(t);
-            if y > 0.0 && y < l2 && t >= 0.0 {
-                return (false, Some(t));
-            }
-            // The cap on the side the (possibly phantom) root points to.
-            return (false, cap_toi(y > 0.0, -1.0));
-        }
-        // The closest approach to the axis stays beyond r, and so do the caps.
-        return (false, None);
-    }
-    // Ray parallel to the axis: only the cap on the current side is reachable.
-    if baoa <= 0.0 {
-        (false, cap_toi(false, -1.0))
-    } else if baoa >= l2 {
-        (false, cap_toi(true, -1.0))
-    } else {
-        (false, None)
-    }
-}
-
-/// Changed to compute with any ray without normalizing.
-///
+/// Adapted from Inigo Quilez (https://iquilezles.org/articles/intersectors/).
+/// Adapted to unnormalized ray direction.
+/// Made robust to degenerate cases and ray origin inside the capsule.
+/// Switched to projecting onto the plane with cross products
+/// because they introduce much less error than a difference of dot products.
 fn ray_toi_with_capsule(
     segment: &Segment,
     radius: Real,
@@ -150,49 +43,58 @@ fn ray_toi_with_capsule(
     let dir_dir = ray.dir.length_squared();
     let ab_dir = ab.dot(ray.dir);
     let ab_ao = ab.dot(ao);
+    let radius_squared = radius * radius;
 
     // do a circle intersection on the plane perpendicular to the capsule's axis.
-    // all these variables are scaled by ab^2
+    // all these variables are scaled by ab
     let dir_on_plane = cross(ray.dir, ab);
     let origin_on_plane = cross(ao, ab);
     let ray_step = dir_on_plane.length_squared();
     let b = dir_on_plane.dot(origin_on_plane);
-    let separation = origin_on_plane.length_squared() - radius * radius * ab_ab;
-    let h = diff_of_products(b, b, ray_step, separation);
+    let separation = origin_on_plane.length_squared() - radius_squared * ab_ab;
+    let h = b * b - ray_step * separation;
+
+    let inside = separation <= 0.0
+        && (0.0 < ab_ao || ao.length_squared() <= radius_squared)
+        && (ab_ao < ab_ab || (ray.origin - segment.b).length_squared() <= radius_squared);
+
+    if inside && solid {
+        return (true, Some(0.0));
+    }
 
     if h >= 0.0 {
-        let t = (-b - h.sqrt()) / ray_step;
-        let y = ab_ao + t * ab_dir;
-        // body
-        if 0.0 < y && y < ab_ab && t >= 0.0 {
-            return (false, Some(t));
-        }
+        let check_sphere_a = if ray_step == 0.0 {
+            // the ray is parallel to the capsule,
+            // so it can only hit one of the caps
+            (ab_dir > 0.0) ^ inside
+        } else {
+            // cylinder part
+            // when outside, take the first intersection, when inside, the second
+            let radical = h.sqrt();
+            let t = (-b + if inside { radical } else { -radical }) / ray_step;
+            let y = ab_ao + t * ab_dir;
+            if 0.0 < y && y < ab_ab && t >= 0.0 {
+                return (inside, Some(t));
+            }
+            y <= 0.0
+        };
+
         // caps
-        // y = NaN means the ray is parallel to the capsule,
-        // so it can only hit one of the caps
-        let oc = if y <= 0.0 || y.is_nan() && ab_dir > 0.0 {
+        let oc = if check_sphere_a {
             ao
         } else {
             ray.origin - segment.b
         };
         let b = ray.dir.dot(oc);
-        let c = oc.length_squared() - radius * radius;
-        let h = diff_of_products(b, b, c, dir_dir);
-        let t = -b - h.sqrt();
+        let c = oc.length_squared() - radius_squared;
+        let h = b * b - c * dir_dir;
+        let radical = h.sqrt();
+        let t = -b + if inside { radical } else { -radical };
         if h >= 0.0 && t >= 0.0 {
-            return (false, Some(t / dir_dir));
+            return (inside, Some(t / dir_dir));
         }
     }
-    return (false, None);
-}
-
-/// Computes ab - cd accurately via Kahan's algorithm
-#[inline]
-fn diff_of_products(a: Real, b: Real, c: Real, d: Real) -> Real {
-    let cd = c * d;
-    let diff = a.mul_add(b, -cd);
-    let error = (-c).mul_add(d, cd);
-    diff + error
+    return (inside, None);
 }
 
 #[cfg(feature = "dim3")]
@@ -305,15 +207,30 @@ mod tests {
         assert!(c
             .cast_local_ray(&Ray::new(v2(2.0, 3.0), v2(1.0, 1.0)), 50.0, true)
             .is_none());
-        // Inside, solid: contact at the origin, inward radial normal.
-        // TODO expect_hit(&c, v2(0.1, 1.0), v2(0.0, 1.0), true, 0.0, v2(-1.0, 0.0));
+        // Inside, solid: contact at the origin, zero normal.
+        expect_hit(&c, v2(0.1, 1.0), v2(0.0, 1.0), true, 0.0, v2(0.0, 0.0));
         // Inside, hollow: the exit, inward normal.
-        //expect_hit(&c, v2(0.0, 1.0), v2(0.0, 1.0), false, 1.0, v2(0.0, -1.0));
+        expect_hit(&c, v2(0.0, 1.0), v2(0.0, 1.0), false, 1.0, v2(0.0, -1.0));
+        // Same, toward the a-cap (the other parallel routing branch).
+        expect_hit(&c, v2(0.0, 1.0), v2(0.0, -1.0), false, 1.0, v2(0.0, 1.0));
+        // Inside, hollow: exit through the cylinder's side (the band exit
+        // root, not a cap).
+        expect_hit(&c, v2(0.0, 1.0), v2(1.0, 0.0), false, 0.5, v2(-1.0, 0.0));
+        // Same, oblique.
+        expect_hit(&c, v2(0.1, 0.8), v2(1.0, 0.5), false, 0.4, v2(-1.0, 0.0));
+        // Inside the b-cap sphere past the slab: the b-sphere exit (t = 0.6)
+        // is an intermediate crossing and must be skipped in favor of the
+        // last one (the a-sphere exit at t = 1.6).
+        expect_hit(&c, v2(0.0, 1.6), v2(0.0, -1.0), false, 1.6, v2(0.0, 1.0));
         // Degenerate zero-length ray, inside / outside.
-        //expect_hit(&c, v2(0.1, 1.0), v2(0.0, 0.0), true, 0.0, v2(-1.0, 0.0));
+        expect_hit(&c, v2(0.1, 1.0), v2(0.0, 0.0), true, 0.0, v2(0.0, 0.0));
         assert!(c
             .cast_local_ray(&Ray::new(v2(0.1, 3.0), v2(0.0, 0.0)), 50.0, true)
             .is_none());
+        // Degenerate capsule (a == b): behaves as a ball of radius 1 at (0, 1).
+        let ball = Capsule::new(v2(0.0, 1.0), v2(0.0, 1.0), 1.0);
+        expect_hit(&ball, v2(0.0, 5.0), v2(0.0, -1.0), true, 3.0, v2(0.0, 1.0));
+        expect_hit(&ball, v2(0.5, 1.0), v2(1.0, 0.0), true, 0.0, v2(0.0, 0.0));
         // max_toi filtering (the top-cap hit above is at t = 15).
         assert!(c
             .cast_local_ray(&Ray::new(v2(0.0, 5.0), v2(0.0, -0.2)), 14.9, true)
@@ -394,6 +311,28 @@ mod tests {
             assert!(
                 !capsule.contains_local_point(hit + i.normal * epsilon),
                 "nudging outward along the normal should go outside the capsule"
+            );
+
+            // A ray from the interior point to the far point (hollow) must
+            // exit the capsule; its normal points inward.
+            let i_in = capsule
+                .cast_local_ray_and_get_normal(&Ray::new(inside, o - inside), 1000.0, false)
+                .expect("a ray from inside toward the outside must exit");
+            let hit_in = inside + (o - inside) * i_in.time_of_impact;
+            assert!(
+                capsule.contains_local_point(hit_in + i_in.normal * epsilon),
+                "nudging along the inward normal should stay inside"
+            );
+            assert!(
+                !capsule.contains_local_point(hit_in - i_in.normal * epsilon),
+                "nudging against the inward normal should go outside"
+            );
+
+            assert!(
+                capsule
+                    .cast_local_ray(&Ray::new(o, -d), 1000.0, true)
+                    .is_none(),
+                "a retreating ray must miss"
             );
 
             #[cfg(feature = "dim2")]
