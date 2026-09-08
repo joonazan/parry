@@ -96,7 +96,7 @@ fn ray_toi_with_capsule(
             }
         }
     }
-    return (inside, None);
+    (inside, None)
 }
 
 #[cfg(feature = "dim3")]
